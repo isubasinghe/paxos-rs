@@ -1,14 +1,18 @@
 use serde::{Deserialize, Serialize};
 use stateright::actor::{register::*, *};
+use stateright::semantics::LinearizabilityTester;
+use stateright::semantics::register::Register;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddrV4};
+
+type RegisterValue = (i32, i32);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct PaxosState {
     id: Id,
     round: u32,
-    prepare_data: BTreeMap<RoundIdentifier, (i32, i32)>,
+    prepare_data: BTreeMap<RoundIdentifier, RegisterValue>,
     promises: BTreeMap<RoundIdentifier, BTreeSet<Id>>,
     accepts: BTreeMap<RoundIdentifier, BTreeSet<Id>>,
     last_seen: Option<RoundIdentifier>,
@@ -22,6 +26,7 @@ impl PaxosState {
         }
     }
 }
+
 
 // strategy to make forward progress on Paxos
 // "majority wins" is not needed for linearizability only for the strict (arguably correct) definition of "consensus".
@@ -71,16 +76,16 @@ impl PartialOrd<Option<RoundIdentifier>> for RoundIdentifier {
 pub enum PaxosMsg {
     Prepare(RoundIdentifier),
     Promise(RoundIdentifier),
-    Accept(RoundIdentifier, (i32, i32)),
-    Accepted(RoundIdentifier, (i32, i32)),
+    Accept(RoundIdentifier, RegisterValue),
+    Accepted(RoundIdentifier, RegisterValue),
 }
 
-pub struct PaxosActor<'a> {
-    peers: Vec<&'a Id>,
+pub struct PaxosActor {
+    peers: Vec<Id>,
 }
 
-impl Actor for PaxosActor<'_> {
-    type Msg = RegisterMsg<RoundIdentifier, (i32, i32), PaxosMsg>;
+impl Actor for PaxosActor {
+    type Msg = RegisterMsg<RoundIdentifier, RegisterValue, PaxosMsg>;
     type State = PaxosState;
 
     fn on_start(&self, id: Id, _o: &mut Out<Self>) -> Self::State {
@@ -146,7 +151,7 @@ impl Actor for PaxosActor<'_> {
                     PaxosMsg::Accept(rid, (key, value)) => {
                         if Some(rid) == state.last_seen {
                             let msg = RegisterMsg::Internal(PaxosMsg::Accepted(rid, (key, value)));
-                            o.broadcast(self.peers.clone(), &msg);
+                            o.broadcast(&self.peers, &msg);
                         }
                     }
                     PaxosMsg::Accepted(rid, (key, value)) => {
@@ -180,15 +185,25 @@ impl Actor for PaxosActor<'_> {
                 let state = state.to_mut();
                 state.prepare_data.insert(rid, (key, value));
                 let msg = RegisterMsg::Internal(PaxosMsg::Prepare(state.next_round()));
-                o.broadcast(self.peers.clone(), &msg);
-            }
-
-            RegisterMsg::PutOk(rid) => {}
-
-            RegisterMsg::Get(rid) => {}
-
-            RegisterMsg::GetOk(rid, value) => {}
+                o.broadcast(&self.peers, &msg);
+            }, 
+            _ => {}
         }
+    }
+}
+
+#[derive(Clone)]
+struct PaxosModelConfig {
+    client_count: usize,
+    server_count: usize
+}
+
+impl PaxosModelConfig {
+
+    fn into_model(self) {
+        let _ = RegisterActor::from
+        let _ =  ActorModel::new(self.clone(), ());
+        todo!()
     }
 }
 
@@ -198,6 +213,7 @@ mod test {
     use stateright::{semantics::register::*, semantics::*, *};
     use ActorModelAction::Deliver;
     use RegisterMsg::{Get, GetOk, Put, PutOk};
+
 }
 
 fn main() {
