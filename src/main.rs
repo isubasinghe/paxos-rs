@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-type RegisterValue = (i32, i32);
+type RegisterValue = char;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct PaxosState {
@@ -74,10 +74,10 @@ impl PartialOrd<Option<RoundIdentifier>> for RoundIdentifier {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum PaxosMsg {
-    Prepare(RoundIdentifier),
-    Promise(RoundIdentifier),
-    Accept(RoundIdentifier, RegisterValue),
-    Accepted(RoundIdentifier, RegisterValue),
+    Prepare(u64, RoundIdentifier),
+    Promise(u64, RoundIdentifier),
+    Accept(u64, RoundIdentifier, RegisterValue),
+    Accepted(u64, RoundIdentifier, RegisterValue),
 }
 
 pub struct PaxosActor {
@@ -85,7 +85,7 @@ pub struct PaxosActor {
 }
 
 impl Actor for PaxosActor {
-    type Msg = RegisterMsg<RoundIdentifier, RegisterValue, PaxosMsg>;
+    type Msg = RegisterMsg<u64, RegisterValue, PaxosMsg>;
     type State = PaxosState;
 
     fn on_start(&self, id: Id, _o: &mut Out<Self>) -> Self::State {
@@ -109,17 +109,20 @@ impl Actor for PaxosActor {
         match msg {
             RegisterMsg::Internal(internal_msg) => {
                 match internal_msg {
-                    PaxosMsg::Prepare(rid) => {
+                    // request_id is stateright specific while rid is the round identifier 
+                    PaxosMsg::Prepare(request_id, rid) => {
                         if rid > state.last_seen {
                             let state = state.to_mut();
                             state.last_seen = Some(rid);
-                            let msg = RegisterMsg::Internal(PaxosMsg::Promise(rid));
+                            let msg = RegisterMsg::Internal(PaxosMsg::Promise(request_id, rid));
                             o.send(src, msg);
                         } else {
                             // nack
                         }
                     }
-                    PaxosMsg::Promise(rid) => {
+
+                    // request_id is stateright specific while rid is the round identifier 
+                    PaxosMsg::Promise(request_id, rid) => {
                         let state = state.to_mut();
                         match state.promises.get_mut(&rid) {
                             Some(set) => {
@@ -132,7 +135,7 @@ impl Actor for PaxosActor {
                             }
                         };
 
-                        let (key, value) = match state.prepare_data.get(&rid) {
+                        let value = match state.prepare_data.get(&rid) {
                             Some(data) => *data,
                             None => return,
                         };
@@ -144,17 +147,17 @@ impl Actor for PaxosActor {
                         let num_peers = self.peers.len();
                         // we have a majority
                         if count / 2 > num_peers {
-                            let msg = RegisterMsg::Internal(PaxosMsg::Accept(rid, (key, value)));
+                            let msg = RegisterMsg::Internal(PaxosMsg::Accept(request_id, rid, value));
                             o.send(src, msg);
                         }
                     }
-                    PaxosMsg::Accept(rid, (key, value)) => {
+                    PaxosMsg::Accept(request_id, rid, value) => {
                         if Some(rid) == state.last_seen {
-                            let msg = RegisterMsg::Internal(PaxosMsg::Accepted(rid, (key, value)));
+                            let msg = RegisterMsg::Internal(PaxosMsg::Accepted(request_id, rid, value));
                             o.broadcast(&self.peers, &msg);
                         }
                     }
-                    PaxosMsg::Accepted(rid, (key, value)) => {
+                    PaxosMsg::Accepted(request_id, rid, value) => {
                         let state = state.to_mut();
 
                         match state.accepts.get_mut(&rid) {
@@ -181,10 +184,11 @@ impl Actor for PaxosActor {
                     }
                 }
             }
-            RegisterMsg::Put(rid, (key, value)) => {
+            RegisterMsg::Put(request_id, value) => {
                 let state = state.to_mut();
-                state.prepare_data.insert(rid, (key, value));
-                let msg = RegisterMsg::Internal(PaxosMsg::Prepare(state.next_round()));
+                let rid = state.next_round();
+                state.prepare_data.insert(rid, value);
+                let msg = RegisterMsg::Internal(PaxosMsg::Prepare(request_id, state.next_round()));
                 o.broadcast(&self.peers, &msg);
             }, 
             _ => {}
@@ -201,8 +205,6 @@ struct PaxosModelConfig {
 impl PaxosModelConfig {
 
     fn into_model(self) {
-        let _ = RegisterActor::from
-        let _ =  ActorModel::new(self.clone(), ());
         todo!()
     }
 }
