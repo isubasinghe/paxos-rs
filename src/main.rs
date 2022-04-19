@@ -3,6 +3,7 @@ use stateright::actor::{register::*, *};
 use stateright::semantics::register::Register;
 use stateright::semantics::LinearizabilityTester;
 use std::borrow::Cow;
+use stateright::Model;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -16,13 +17,16 @@ pub struct PaxosState {
     promises: BTreeMap<RoundIdentifier, BTreeSet<Id>>,
     accepts: BTreeMap<RoundIdentifier, BTreeSet<Id>>,
     last_seen: Option<RoundIdentifier>,
+    value: Option<char>,
+    decided: bool
 }
 
 impl PaxosState {
-    fn next_round(&self) -> RoundIdentifier {
+    fn next_round(&mut self) -> RoundIdentifier {
+        self.round += 1;
         RoundIdentifier {
             id: self.id.clone(),
-            round_num: self.round + 1,
+            round_num: self.round,
         }
     }
 }
@@ -55,28 +59,14 @@ impl Ord for RoundIdentifier {
     }
 }
 
-impl PartialEq<Option<RoundIdentifier>> for RoundIdentifier {
-    fn eq(&self, other: &Option<RoundIdentifier>) -> bool {
-        let rid = match other {
-            Some(rid) => rid,
-            None => return false,
-        };
-        self.eq(rid)
-    }
-}
 
-impl PartialOrd<Option<RoundIdentifier>> for RoundIdentifier {
-    fn partial_cmp(&self, other: &Option<RoundIdentifier>) -> Option<std::cmp::Ordering> {
-        other.map(|val| self.cmp(&val))
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum PaxosMsg {
-    Prepare(u64, RoundIdentifier),
-    Promise(u64, RoundIdentifier),
-    Accept(u64, RoundIdentifier, RegisterValue),
-    Accepted(u64, RoundIdentifier, RegisterValue),
+    Prepare(u64, Id, RoundIdentifier),
+    Promise(u64, Id, RoundIdentifier), 
+    Accept(u64, Id, RoundIdentifier, RegisterValue),
+    Accepted(u64, Id, RoundIdentifier, RegisterValue),
 }
 
 pub struct PaxosActor {
@@ -95,6 +85,8 @@ impl Actor for PaxosActor {
             last_seen: None,
             promises: BTreeMap::new(),
             accepts: BTreeMap::new(),
+            decided: false, 
+            value: None
         }
     }
     fn on_msg(
@@ -109,27 +101,38 @@ impl Actor for PaxosActor {
             RegisterMsg::Internal(internal_msg) => {
                 match internal_msg {
                     // request_id is stateright specific while rid is the round identifier
-                    PaxosMsg::Prepare(request_id, rid) => {
-                        if rid > state.last_seen {
+                    PaxosMsg::Prepare(request_id, org_sender, rid) => {
+                        if state.decided {
+                            return;
+                        }
+
+                        let greater = match state.last_seen {
+                            Some(val) => rid > val,
+                            None => true
+                        };
+                        if greater {
                             let state = state.to_mut();
                             state.last_seen = Some(rid);
-                            let msg = RegisterMsg::Internal(PaxosMsg::Promise(request_id, rid));
+                            let msg = RegisterMsg::Internal(PaxosMsg::Promise(request_id, org_sender, rid));
                             o.send(src, msg);
                         } else {
                             // nack
-                        }
+                        } 
                     }
 
                     // request_id is stateright specific while rid is the round identifier
-                    PaxosMsg::Promise(request_id, rid) => {
+                    PaxosMsg::Promise(request_id, org_sender, rid) => {
+                        if state.decided {
+                            return 
+                        }
                         let state = state.to_mut();
                         match state.promises.get_mut(&rid) {
                             Some(set) => {
-                                set.insert(rid.id);
+                                set.insert(src);
                             }
                             None => {
                                 let mut set = BTreeSet::new();
-                                set.insert(rid.id);
+                                set.insert(src);
                                 state.promises.insert(rid, set);
                             }
                         };
@@ -145,29 +148,35 @@ impl Actor for PaxosActor {
                         };
                         let num_peers = self.peers.len();
                         // we have a majority
-                        if count / 2 > num_peers {
+                        if count  > num_peers / 2 {
                             let msg =
-                                RegisterMsg::Internal(PaxosMsg::Accept(request_id, rid, value));
-                            o.send(src, msg);
-                        }
-                    }
-                    PaxosMsg::Accept(request_id, rid, value) => {
-                        if Some(rid) == state.last_seen {
-                            let msg =
-                                RegisterMsg::Internal(PaxosMsg::Accepted(request_id, rid, value));
+                                RegisterMsg::Internal(PaxosMsg::Accept(request_id, org_sender, rid, value));
                             o.broadcast(&self.peers, &msg);
                         }
                     }
-                    PaxosMsg::Accepted(request_id, rid, value) => {
+                    PaxosMsg::Accept(request_id, org_sender, rid, value) => {
+                        if state.decided {
+                            return;
+                        }
+                        if Some(rid) == state.last_seen {
+                            let msg =
+                                RegisterMsg::Internal(PaxosMsg::Accepted(request_id, org_sender, rid, value));
+                            o.broadcast(&self.peers, &msg);
+                        }
+                    }
+                    PaxosMsg::Accepted(request_id, org_sender, rid, value) => {
+                        if state.decided {
+                            return; 
+                        }
                         let state = state.to_mut();
 
                         match state.accepts.get_mut(&rid) {
                             Some(set) => {
-                                set.insert(rid.id);
+                                set.insert(src);
                             }
                             None => {
                                 let mut set = BTreeSet::new();
-                                set.insert(rid.id);
+                                set.insert(src);
                                 state.accepts.insert(rid, set);
                             }
                         };
@@ -178,8 +187,14 @@ impl Actor for PaxosActor {
                         };
 
                         let num_peers = self.peers.len();
-                        if count / 2 > num_peers {
-                            // let msg = RegisterMsg::PutOk(rid);
+                        if count > num_peers / 2 {
+                            let msg = RegisterMsg::PutOk(request_id);
+                            state.value = Some(value);
+                            state.decided = true;
+                            o.send(org_sender, msg);
+                            println!("{} has accepted value {}", state.id, value);
+                            
+                            
                         }
                     }
                 }
@@ -188,7 +203,7 @@ impl Actor for PaxosActor {
                 let state = state.to_mut();
                 let rid = state.next_round();
                 state.prepare_data.insert(rid, value);
-                let msg = RegisterMsg::Internal(PaxosMsg::Prepare(request_id, state.next_round()));
+                let msg = RegisterMsg::Internal(PaxosMsg::Prepare(request_id, src, rid));
                 o.broadcast(&self.peers, &msg);
             }
             _ => {}
@@ -258,5 +273,11 @@ mod test {
  */
 fn main() {
     let address = "localhost:3000";  
-    println!("Serving from {0}", address);
+    let clients = 3;
+    println!("Serving from {0} for {1} client(s)", address, clients);
+    PaxosModelConfig{
+        client_count: clients, 
+        server_count: 3, 
+    }.into_model().checker().threads(12).serve(address);
+
 }
