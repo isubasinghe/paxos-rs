@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 use stateright::actor::{register::*, *};
 use stateright::semantics::register::Register;
 use stateright::semantics::LinearizabilityTester;
-use std::borrow::Cow;
+use stateright::Checker;
 use stateright::Model;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -18,7 +19,7 @@ pub struct PaxosState {
     accepts: BTreeMap<RoundIdentifier, BTreeSet<Id>>,
     last_seen: Option<RoundIdentifier>,
     value: Option<char>,
-    decided: bool
+    decided: bool,
 }
 
 impl PaxosState {
@@ -59,12 +60,10 @@ impl Ord for RoundIdentifier {
     }
 }
 
-
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum PaxosMsg {
     Prepare(u64, Id, RoundIdentifier),
-    Promise(u64, Id, RoundIdentifier), 
+    Promise(u64, Id, RoundIdentifier),
     Accept(u64, Id, RoundIdentifier, RegisterValue),
     Accepted(u64, Id, RoundIdentifier, RegisterValue),
 }
@@ -85,8 +84,8 @@ impl Actor for PaxosActor {
             last_seen: None,
             promises: BTreeMap::new(),
             accepts: BTreeMap::new(),
-            decided: false, 
-            value: None
+            decided: false,
+            value: None,
         }
     }
     fn on_msg(
@@ -108,22 +107,24 @@ impl Actor for PaxosActor {
 
                         let greater = match state.last_seen {
                             Some(val) => rid > val,
-                            None => true
+                            None => true,
                         };
                         if greater {
                             let state = state.to_mut();
                             state.last_seen = Some(rid);
-                            let msg = RegisterMsg::Internal(PaxosMsg::Promise(request_id, org_sender, rid));
+                            let msg = RegisterMsg::Internal(PaxosMsg::Promise(
+                                request_id, org_sender, rid,
+                            ));
                             o.send(src, msg);
                         } else {
                             // nack
-                        } 
+                        }
                     }
 
                     // request_id is stateright specific while rid is the round identifier
                     PaxosMsg::Promise(request_id, org_sender, rid) => {
                         if state.decided {
-                            return 
+                            return;
                         }
                         let state = state.to_mut();
                         match state.promises.get_mut(&rid) {
@@ -148,9 +149,10 @@ impl Actor for PaxosActor {
                         };
                         let num_peers = self.peers.len();
                         // we have a majority
-                        if count  > num_peers / 2 {
-                            let msg =
-                                RegisterMsg::Internal(PaxosMsg::Accept(request_id, org_sender, rid, value));
+                        if count > num_peers / 2 {
+                            let msg = RegisterMsg::Internal(PaxosMsg::Accept(
+                                request_id, org_sender, rid, value,
+                            ));
                             o.broadcast(&self.peers, &msg);
                         }
                     }
@@ -159,14 +161,15 @@ impl Actor for PaxosActor {
                             return;
                         }
                         if Some(rid) == state.last_seen {
-                            let msg =
-                                RegisterMsg::Internal(PaxosMsg::Accepted(request_id, org_sender, rid, value));
+                            let msg = RegisterMsg::Internal(PaxosMsg::Accepted(
+                                request_id, org_sender, rid, value,
+                            ));
                             o.broadcast(&self.peers, &msg);
                         }
                     }
                     PaxosMsg::Accepted(request_id, org_sender, rid, value) => {
                         if state.decided {
-                            return; 
+                            return;
                         }
                         let state = state.to_mut();
 
@@ -192,9 +195,6 @@ impl Actor for PaxosActor {
                             state.value = Some(value);
                             state.decided = true;
                             o.send(org_sender, msg);
-                            println!("{} has accepted value {}", state.id, value);
-                            
-                            
                         }
                     }
                 }
@@ -258,6 +258,32 @@ impl PaxosModelConfig {
                 false
             },
         )
+        .property(
+            stateright::Expectation::Eventually,
+            "consensus reached",
+            |_, state| {
+                let mut map = BTreeMap::new();
+                let server_count = &state.actor_states.len();
+                for actor_state in &state.actor_states {
+                    match actor_state.as_ref() {
+                        RegisterActorState::Server(ref server_state) => {
+                            if let Some(val) = server_state.value {
+                                *map.entry(val).or_insert(0) += 1;
+                            }
+                        }
+                        _ => {}
+                    };
+                }
+
+                for (_, count) in &map {
+                    if count != server_count && count != &0 {
+                        return false;
+                    }
+                }
+
+                true
+            },
+        )
         .record_msg_in(RegisterMsg::record_returns)
         .record_msg_out(RegisterMsg::record_invocations)
     }
@@ -272,12 +298,26 @@ mod test {
 }
  */
 fn main() {
-    let address = "localhost:3000";  
+    let address = "localhost:3000";
     let clients = 3;
-    println!("Serving from {0} for {1} client(s)", address, clients);
-    PaxosModelConfig{
-        client_count: clients, 
-        server_count: 3, 
-    }.into_model().checker().threads(12).serve(address);
-
+    let action = std::env::args().nth(1).unwrap_or("check".to_string());
+    let model = PaxosModelConfig {
+        client_count: clients,
+        server_count: 3,
+    }
+    .into_model()
+    .checker()
+    .threads(12);
+    match action.as_str() {
+        "check" => {
+            model.spawn_dfs().report(&mut std::io::stdout());
+        }
+        "explore" => {
+            println!("Serving from {0} for {1} client(s)", address, clients);
+            model.serve(address);
+        }
+        _ => {
+            println!("Unknown option passed");
+        }
+    }
 }
