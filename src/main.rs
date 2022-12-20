@@ -6,7 +6,6 @@ use stateright::Checker;
 use stateright::Model;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{Ipv4Addr, SocketAddrV4};
 
 type RegisterValue = char;
 
